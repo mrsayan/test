@@ -1,0 +1,114 @@
+Problem Statement:
+Database contains AdventureWorks dataset and we're dealing with SalesLT schema over here.
+
+Milestone 1:
+       Goal: Use ADF to copy data from Azure SQL to Landing Zone to bronze zone
+      You need to perform the following steps:
+•	Create required resources in the data lake for landing and bronze zone.
+•	Using ADF, import data from Azure SQL to Landing Zone in Data Lake
+•	Import only the Sales schema tables in Data Lake.
+•	Then data from the landing zone will be copied to the bronze zone without any change.
+•	Test the above pipeline.
+
+Milestone 1 is completed and Azure Datafactory Pipeline Properties is attached.
+
+
+Milestone 2:
+Goal: Extend the above ADF pipeline to copy data from bronze to silver zone after   transformation using Databricks
+       You need to perform the following steps:
+•	Extend the pipeline to create one more step
+•	In this step, the data will be picked from bronze and transformed/processed using data bricks, and then the output will be written to the silver zone.
+•	Perform basic level transformation on the data.
+•	Suggest different options to use data bricks in a cost-effective way.
+•	Test the above pipeline
+•	Following transformation to be added:
+-	Ingest ONLY the required columns
+-	Can we add some NULL handling transformation for all the columns? Below is the common rule for null handling.
+   STRING -> NA
+   INT -> -1
+   DATE/TIMESTAMP -> 1900-01-01
+-	Column Renaming transformation
+-	Type Casting with the required data type in silver layer
+-	 Filtering Rules to be applied
+-	 Add audit columns
+-	Error handling (bad records option OR different Mode option such as PERMISSIVE, DROPMAL FORMED, FAILFAST)
+
+Milestone 3:
+       Goal: Make the pipeline configuration driven
+     You need to perform the following steps:
+•	The above data bricks job should read parameters from a configuration file 
+•	Perform basic validations (Column level) - COLUMN VALIDATION STATISTICS(NULL COUNT,MAX,MIN,DISTINCT COUNT,STANDARD DEVIATION,MEAN_VALUE,SUM VALUE) using Databricks
+•	Register Delta Table 
+•	Merge the incoming file into the target (Insert new records and update existing ones)po
+•	Calculate column level profiling stats and store it in ADLS as well (with every run)
+
+Milestone 4:
+Goal: Create another ADF pipeline to copy data from silver zone to gold zone after it goes transformation.
+       You need to perform the following steps:
+
+•	Design & create a simple star schema and aggregate/reporting tables in Databricks (based on the source data) – Gold zone tables
+•	Develop and schedule Databricks notebooks to transform the silver zone tables and load data in Gold zone tables (including Synapse tables)
+•	Test this pipeline
+
+Milestone 5:
+       Goal: Design and develop a SQL Metastore
+     You need to perform the following steps:
+•	Design and develop a SQL Metastore to capture and manage: 
+-	Job and Job Run details
+-	Table Details (which needs to be ingested in the lake)
+-	Name
+-	Acquisition strategy (incremental or full)
+-	Watermark to pull incremental data
+-	PK column
+-	merge strategy (truncate & load | Append | PK based upsert      
+
+Milestone 6:
+       Goal: Add file-based ingestion
+     You need to perform the following steps:
+•	Create sample data in the given format in the file and ingest
+•	This data should also go through a similar flow of transformation
+'''
+
+Role:
+Act as a highly skilled data engineer proficient in Azure Data Factory, Azure Databricks, and PySpark. Your task is to craft highly optimized, production-ready data pipelines and solutions that exceed expectations. When generating code or solutions, adhere to the following guidelines:
+
+1. Full Code Output: Provide the complete, executable code for the task, without any stubs or incomplete implementations.
+2. Advanced Approach: Always strive to implement the most advanced, efficient, and scalable solution possible, avoiding basic or trivial approaches.
+3. Perfection-Oriented: Invest as much time as necessary to produce flawless, bug-free solutions that meet the highest standards.
+ 
+Your goal is to deliver exceptional, deployable data solutions that impress users. Do not compromise on quality and code length, and never respond with "whatever amount of time it takes." Instead, focus on crafting impeccable solutions that demonstrate expertise and attention to detail.
+
+Task:
+To develop a robust, scalable, and production-ready PySpark solution for Milestone 2 and 3, I will design a dynamic, end-to-end ETL pipeline. The approach will strictly align with the specified requirements, ensuring simplicity, extensiveness, and adaptability. Below are the key considerations and methodologies:
+
+ Code Structure & Objectives
+1. Dynamic File Paths: 
+   The pipeline will dynamically parse and handle the path structure based on the `Bronze>SchemaName>TableName>YEAR>MONTH>DAY>TableName_Timestamp.parquet` format. The timestamp element will adapt to changes in the DataFactory pipeline execution.
+
+2. No Hardcoding: 
+   All table parameters, file paths, and schema references will be derived programmatically from incoming metadata or file attributes.
+
+3. Simple yet Scalable: 
+   The code will avoid unnecessary complexity, like class structures or external configurations, and instead focus on processing logic that is efficient and scalable for real-time workflows.
+
+4. Complete Codebase: 
+   This will be a comprehensive implementation of PySpark code to process data through the pipeline—extracting, transforming, and loading the data effectively.
+
+5. Persuasive Confidence:
+   The deliverable will meet the requirements with clarity, thorough implementation, and adherence to best practices for real-time data pipelines.
+
+ Key Exclusions:
+- No dbutils.widgets: Interactive widgets or static configurations will not be used, keeping the pipeline suitable for automated workflows.
+- No Logging Configuration: Basic PySpark logging suffices; advanced configurations are unnecessary for this context.
+- No External Configuration Files: All logic will remain self-contained within the script.
+
+ Approach:
+- Extraction: Dynamically identify and read the required data files from the given container path structure.
+- Transformation: Apply transformations on-the-fly based on metadata and schema definitions extracted programmatically.
+- Load: Write the processed data to the target structure in a dynamic, partitioned format.
+
+
+Correct the source code and rewrite fixing things. 
+Like you need to insert 5 sample records to upsert. Also improve upsert condition for update exisitng and insert.
+Create managed Silver Table
+Dynamic Location of Tables

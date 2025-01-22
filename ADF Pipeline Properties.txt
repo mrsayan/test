@@ -1,0 +1,232 @@
+ADF Pipeline Properties from Milestone 1:
+
+
+{
+    "name": "adf_job_il03",
+    "properties": {
+        "activities": [
+            {
+                "name": "QuerySchema",
+                "type": "Lookup",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": "select table_schema, table_name\nfrom information_schema.tables\nwhere table_type='base table' and table_schema='SalesLT'",
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "dataset": {
+                        "referenceName": "source",
+                        "type": "DatasetReference"
+                    },
+                    "firstRowOnly": false
+                }
+            },
+            {
+                "name": "Tables List",
+                "type": "ForEach",
+                "dependsOn": [
+                    {
+                        "activity": "QuerySchema",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "items": {
+                        "value": "@activity('QuerySchema').output.value",
+                        "type": "Expression"
+                    },
+                    "activities": [
+                        {
+                            "name": "SQL to Landing",
+                            "type": "Copy",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "AzureSqlSource",
+                                    "sqlReaderQuery": {
+                                        "value": "SELECT * FROM SalesLT.@{item().table_name}",
+                                        "type": "Expression"
+                                    },
+                                    "queryTimeout": "02:00:00",
+                                    "partitionOption": "None"
+                                },
+                                "sink": {
+                                    "type": "ParquetSink",
+                                    "storeSettings": {
+                                        "type": "AzureBlobFSWriteSettings"
+                                    },
+                                    "formatSettings": {
+                                        "type": "ParquetWriteSettings"
+                                    }
+                                },
+                                "enableStaging": false,
+                                "translator": {
+                                    "type": "TabularTranslator",
+                                    "typeConversion": true,
+                                    "typeConversionSettings": {
+                                        "allowDataTruncation": true,
+                                        "treatBooleanAsNumber": false
+                                    }
+                                }
+                            },
+                            "inputs": [
+                                {
+                                    "referenceName": "source",
+                                    "type": "DatasetReference"
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "referenceName": "target",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "Container": "landing",
+                                        "SchemaName": "@item().table_schema",
+                                        "TableName": "@item().table_name",
+                                        "Year": {
+                                            "value": "@{formatDateTime(utcNow(), 'yyyy')}",
+                                            "type": "Expression"
+                                        },
+                                        "Month": {
+                                            "value": "@{formatDateTime(utcNow(), 'MM')}",
+                                            "type": "Expression"
+                                        },
+                                        "Day": {
+                                            "value": "@{formatDateTime(utcNow(), 'dd')}",
+                                            "type": "Expression"
+                                        },
+                                        "FileName": {
+                                            "value": "@{item().table_name}_@{formatDateTime(utcNow(), 'yyyy-MM-dd_HH-mm-ss')}.parquet",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Landing to Bronze",
+                "type": "Copy",
+                "dependsOn": [
+                    {
+                        "activity": "Tables List",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "ParquetSource",
+                        "storeSettings": {
+                            "type": "AzureBlobFSReadSettings",
+                            "recursive": true,
+                            "wildcardFileName": "*.parquet",
+                            "enablePartitionDiscovery": false
+                        },
+                        "formatSettings": {
+                            "type": "ParquetReadSettings"
+                        }
+                    },
+                    "sink": {
+                        "type": "ParquetSink",
+                        "storeSettings": {
+                            "type": "AzureBlobFSWriteSettings"
+                        },
+                        "formatSettings": {
+                            "type": "ParquetWriteSettings"
+                        }
+                    },
+                    "enableStaging": false,
+                    "translator": {
+                        "type": "TabularTranslator",
+                        "typeConversion": true,
+                        "typeConversionSettings": {
+                            "allowDataTruncation": true,
+                            "treatBooleanAsNumber": false
+                        }
+                    }
+                },
+                "inputs": [
+                    {
+                        "referenceName": "zone",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "Container": "landing"
+                        }
+                    }
+                ],
+                "outputs": [
+                    {
+                        "referenceName": "zone",
+                        "type": "DatasetReference",
+                        "parameters": {
+                            "Container": "bronze"
+                        }
+                    }
+                ]
+            },
+            {
+                "name": "Bronze to Silver",
+                "type": "DatabricksNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "Landing to Bronze",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "notebookPath": "/Users/abatch23@heu.ai/bronze_to_silver"
+                },
+                "linkedServiceName": {
+                    "referenceName": "linksrvc_adb_il03",
+                    "type": "LinkedServiceReference"
+                }
+            }
+        ],
+        "annotations": [],
+        "lastPublishTime": "2025-01-21T05:46:13Z"
+    },
+    "type": "Microsoft.DataFactory/factories/pipelines"
+}

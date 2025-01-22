@@ -1,0 +1,397 @@
+|-- config.py
+|-- utils.py
+|-- bronze_to_silver.py
+|-- mount.py
+
+
+# File: config.py
+
+# Databricks notebook source
+# Configuration Parameters
+storage_account_name = "sail03"
+sas_token = "sv=2022-11-02"
+
+# Container names
+containers = {
+    "landing": "/mnt/landing",
+    "bronze": "/mnt/bronze",
+    "silver": "/mnt/silver",
+    "gold": "/mnt/gold"
+}
+
+# Schema and transformation rules
+schema_name = "SalesLT"
+transformation_rules = {
+    "null_handling": {
+        "STRING": "NA",
+        "INT": -1,
+        "DATE": "1900-01-01"
+    },
+    "rename_columns": [
+        {"old_name": "old_column_1", "new_name": "new_column_1"},
+        {"old_name": "old_column_2", "new_name": "new_column_2"}
+    ],
+data_type_casting = {
+    "IntegerColumns": ["ProductID", "OrderQty", "CustomerID"],
+    "DecimalColumns": {
+        "UnitPrice": {"precision": 19, "scale": 4},
+        "LineTotal": {"precision": 19, "scale": 4}
+    },
+    "TimestampColumns": ["ModifiedDate", "OrderDate", "DueDate", "ShipDate"]
+}
+
+table_primary_keys = {
+    "SalesOrderHeader": "SalesOrderID",
+    "SalesOrderDetail": "SalesOrderDetailID",
+    "Product": "ProductID",
+    "Customer": "CustomerID",
+    "Address": "AddressID"
+}
+
+required_columns = {
+    "SalesOrderHeader": ["SalesOrderID", "CustomerID", "OrderDate"],
+    "SalesOrderDetail": ["SalesOrderDetailID", "SalesOrderID", "ProductID"],
+    "Product": ["ProductID", "Name", "ProductNumber"],
+    "Customer": ["CustomerID", "FirstName", "LastName"],
+    "Address": ["AddressID", "AddressLine1", "City"]
+}
+
+delta_merge_strategy = {
+    "type": "upsert",
+    "primary_key": "id"
+}
+
+error_handling_mode = "PERMISSIVE"
+bad_records_path = f"{containers['bronze']}/bad_records"
+
+# Delta Table Paths
+delta_table_paths = {
+    "silver": f"{containers['silver']}",
+    "profiling_stats": f"{containers['silver']}/profiling_stats"
+}
+
+# Profiling Metrics
+profiling_metrics = [
+    "null_count", "distinct_count", "min", "max", "mean", "stddev", "sum"
+]
+
+
+
+# File: utils.py
+
+# Databricks notebook source
+from pyspark.sql.functions import col, when, lit, current_timestamp, countDistinct, min, max, avg, stddev_samp, sum
+from pyspark.sql.types import StringType, IntegerType, DateType, TimestampType, DecimalType, NumericType
+
+# COMMAND ----------
+
+# Null handling
+def handle_nulls(df, null_handling_rules):
+    for column in df.columns:
+        data_type = df.schema[column].dataType
+        if isinstance(data_type, StringType):
+            df = df.withColumn(column, when(col(column).isNull(), null_handling_rules["STRING"]).otherwise(col(column)))
+        elif isinstance(data_type, IntegerType):
+            df = df.withColumn(column, when(col(column).isNull(), null_handling_rules["INT"]).otherwise(col(column)))
+        elif isinstance(data_type, (DateType, TimestampType)):
+            df = df.withColumn(column, when(col(column).isNull(), lit(null_handling_rules["DATE"])).otherwise(col(column)))
+    return df
+
+# COMMAND ----------
+
+# Column renaming
+def rename_columns(df, rename_rules):
+    for rule in rename_rules:
+        df = df.withColumnRenamed(rule["old_name"], rule["new_name"])
+    return df
+
+# COMMAND ----------
+
+# Type casting
+def apply_data_type_casting(df, table_name):
+    """Apply data type casting based on configuration"""
+    # Cast Integer columns
+    for col_name in data_type_casting["IntegerColumns"]:
+        if col_name in df.columns:
+            df = df.withColumn(col_name, col(col_name).cast(IntegerType()))
+    
+    # Cast Decimal columns
+    for col_name, specs in data_type_casting["DecimalColumns"].items():
+        if col_name in df.columns:
+            df = df.withColumn(col_name, 
+                             col(col_name).cast(DecimalType(specs["precision"], 
+                                                          specs["scale"])))
+    
+    # Cast Timestamp columns
+    for col_name in data_type_casting["TimestampColumns"]:
+        if col_name in df.columns:
+            df = df.withColumn(col_name, col(col_name).cast(TimestampType()))
+            
+    return df
+
+# COMMAND ----------
+
+def get_primary_key(table_name):
+    """Get primary key for a table"""
+    if table_name not in table_primary_keys:
+        raise ValueError(f"No primary key defined for table {table_name}")
+    return table_primary_keys[table_name]
+
+
+# COMMAND ----------
+
+# Profiling statistics calculation
+def calculate_profiling_metrics(df):
+    stats = []
+    for column in df.columns:
+        column_stats = {
+            "column_name": column,
+            "null_count": df.filter(col(column).isNull()).count(),
+            "distinct_count": df.select(countDistinct(column)).collect()[0][0]
+        }
+
+        data_type = df.schema[column].dataType
+        if isinstance(data_type, (NumericType,IntegerType, DecimalType)):
+            column_stats.update({
+                "min": df.select(min(column)).collect()[0][0],
+                "max": df.select(max(column)).collect()[0][0],
+                "mean": df.select(avg(column)).collect()[0][0],
+                "stddev": df.select(stddev_samp(column)).collect()[0][0],
+                "sum": df.select(sum(column)).collect()[0][0]
+            })
+        else:
+            column_stats.update({
+                "min": None,
+                "max": None,
+                "mean": None,
+                "stddev": None,
+                "sum": None
+            })
+
+        stats.append(column_stats)
+    return stats
+
+# COMMAND ----------
+
+# Delta merge
+def delta_merge(delta_table_path, incoming_df, merge_key):
+    from delta.tables import DeltaTable
+
+    delta_table = DeltaTable.forPath(spark, delta_table_path)
+
+    delta_table.alias("target").merge(
+        source=incoming_df.alias("source"),
+        condition=f"target.{merge_key} = source.{merge_key}"
+    ).whenMatchedUpdateAll(set={col: F.col(f"s.{col}") for col in incoming_df.columns}
+    ).whenNotMatchedInsertAll(
+    ).execute()
+
+# COMMAND ----------
+
+
+# Schema validation
+def validate_required_columns(df, table_name):
+    """Validate required columns exist in dataframe"""
+    if table_name not in required_columns:
+        raise ValueError(f"No required columns defined for table {table_name}")
+        
+    missing_cols = [col for col in required_columns[table_name] 
+                   if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns for {table_name}: {missing_cols}")
+    
+    return df
+
+# COMMAND ----------
+
+# Adding audit columns
+# def add_audit_columns(df, source_file_name):
+#     return df.withColumn("processed_date", current_timestamp()) \
+#              .withColumn("source_file_name", lit(source_file_name))
+
+
+# File: bronze_to_silver.py
+
+# Databricks notebook source
+# MAGIC %run ./config
+
+# COMMAND ----------
+
+# MAGIC %run ./mount
+
+# COMMAND ----------
+
+# MAGIC %run ./utils
+
+# COMMAND ----------
+
+from pyspark.sql.functions import col, when, lit, current_timestamp, regexp_replace
+from pyspark.sql.types import StringType, IntegerType, DateType, TimestampType, DecimalType, NumericType
+from delta.tables import DeltaTable
+import datetime
+
+# Configuration
+current_date = datetime.datetime.now()
+year = str(current_date.year)
+month = str(current_date.month).zfill(2)
+day = str(current_date.day).zfill(2)
+
+# COMMAND ----------
+
+def process_bronze_to_silver():
+    """Main processing function"""
+    try:
+        # Get bronze tables
+        bronze_tables = [item.name.strip('/') for item in 
+                        dbutils.fs.ls(containers['bronze'])]
+        
+        processing_stats = []
+        
+        for table_name in bronze_tables:
+            print(f"Processing table: {table_name}")
+            
+            # Read bronze data
+            bronze_path = f"{containers['bronze']}/{table_name}/{year}/{month}/{day}"
+            
+            if not dbutils.fs.ls(bronze_path):
+                print(f"No data found for {table_name}")
+                continue
+                
+            df = spark.read.format("parquet")\
+                .option("mode", error_handling_mode)\
+                .option("columnNameOfCorruptRecord", "BadRecord")\
+                .option("badRecordsPath", f"{bad_records_path}/{table_name}")\
+                .load(bronze_path)
+            
+            # Validate required columns
+            df = validate_required_columns(df, table_name)
+            
+            # Apply transformations
+            df_transformed = transform_data(df, table_name)
+            
+            # Calculate profiling stats
+            table_stats = calculate_profiling_metrics(df_transformed)
+            processing_stats.extend([{**stat, "table_name": table_name} 
+                                  for stat in table_stats])
+            
+            # Save to silver
+            silver_path = f"{containers['silver']}/{table_name}/{year}/{month}/{day}"
+            save_to_silver(df_transformed, table_name, silver_path)
+            
+        # Save processing stats
+        save_profiling_stats(processing_stats)
+        
+    except Exception as e:
+        raise Exception(f"Bronze to Silver processing error: {str(e)}")
+
+# COMMAND ----------
+
+def transform_data(df, table_name):
+    """Apply all transformations"""
+    try:
+        # 1. Handle nulls
+        df = handle_nulls(df, transformation_rules["null_handling"])
+        
+        # 2. Apply data type casting
+        df = apply_data_type_casting(df, table_name)
+        
+        # 3. Add audit columns
+        df = df.withColumn("processed_timestamp", current_timestamp())\
+               .withColumn("processed_by", lit(spark.sparkContext.sparkUser()))\
+               .withColumn("source_system", lit("bronze_layer"))\
+               .withColumn("table_name", lit(table_name))
+        
+        return df
+    
+    except Exception as e:
+        raise Exception(f"Transformation error for {table_name}: {str(e)}")
+
+# COMMAND ----------
+
+def save_to_silver(df, table_name, silver_path):
+    """Save data to silver layer"""
+    try:
+        # Get primary key
+        primary_key = get_primary_key(table_name)
+        
+        # Save as delta table
+        if DeltaTable.isDeltaTable(spark, silver_path):
+            # Perform merge
+            delta_table = DeltaTable.forPath(spark, silver_path)
+            
+            delta_table.alias("target").merge(
+                source=df.alias("source"),
+                condition=f"target.{primary_key} = source.{primary_key}"
+            ).whenMatchedUpdateAll()\
+             .whenNotMatchedInsertAll()\
+             .execute()
+        else:
+            # Initial write
+            df.write.format("delta")\
+                .mode("overwrite")\
+                .save(silver_path)
+            
+        # Register in metastore
+        spark.sql(f"""
+            CREATE TABLE IF NOT EXISTS silver.{table_name}
+            USING DELTA
+            LOCATION '{silver_path}'
+        """)
+        
+    except Exception as e:
+        raise Exception(f"Error saving to silver: {str(e)}")
+
+# COMMAND ----------
+
+def save_profiling_stats(stats):
+    """
+    Save profiling statistics to delta table
+    """
+    try:
+        stats_df = spark.createDataFrame(stats)
+        stats_path = f"{delta_table_paths['profiling_stats']}/{year}/{month}/{day}"
+        
+        stats_df.write.format("delta")\
+            .mode("append")\
+            .save(stats_path)
+            
+    except Exception as e:
+        raise Exception(f"Error saving profiling stats: {str(e)}")
+
+# COMMAND ----------
+
+# Execute the pipeline
+if __name__ == "__main__":
+    process_bronze_to_silver()
+
+
+# File: mount.py
+
+# Databricks notebook source
+# MAGIC %run ./config
+
+# COMMAND ----------
+
+def mount_container(container_name, mount_point):
+    try:
+        dbutils.fs.mount(
+            source=f"wasbs://{container_name}@{storage_account_name}.blob.core.windows.net",
+            mount_point=mount_point,
+            extra_configs={f"fs.azure.sas.{container_name}.{storage_account_name}.blob.core.windows.net": sas_token}
+        )
+        print(f"Mounted {container_name} to {mount_point}")
+    except Exception as e:
+        if "already mounted" in str(e):
+            print(f"{container_name} is already mounted at {mount_point}")
+        else:
+            print(f"Error mounting {container_name}: {e}")
+
+# Mount all containers
+for container, mount_point in containers.items():
+    mount_container(container, mount_point)
+
+# COMMAND ----------
+
+# List mounted containers
+print("Mounted containers:")
+display(dbutils.fs.ls("/mnt/"))
