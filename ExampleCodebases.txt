@@ -1,0 +1,766 @@
+Example Codebase 1:
+bronze_to_silver.py-
+# Databricks notebook source
+# MAGIC %run ./mountNB
+
+# COMMAND ----------
+
+# MAGIC %run ./utility
+
+# COMMAND ----------
+
+# # from pyspark.sql.functions import current_date, year, month, dayofmonth
+# # dbutils.widgets.text("year", "") 
+# # dbutils.widgets.text("month", "") 
+# # dbutils.widgets.text("day", "")
+
+year="2025"
+month="01"
+date="16"
+
+# COMMAND ----------
+
+bronzeMount="/mnt/hritikbronzezone"
+silverMount="/mnt/hritiksilverzone"
+lenFileList=len(dbutils.fs.ls(bronzeMount))
+i=0
+while(i<lenFileList):
+    # Error-Handling for files:
+    # Permissive, DropMalformed or FailFast
+    df = spark.read.format("parquet").option("mode","PERMISSSIVE").option("columnNameOfCorruptRecord","BadRecord").option("badRecordPath",f"/mnt/bronze/SalesLT/bad_records/{dbutils.fs.ls(bronzeMount)[i].name}{year}/{month}/{date}").option("header", "true").option("inferSchema", "true").load(f"/mnt/hritikbronzezone/{dbutils.fs.ls(bronzeMount)[i].name}/{year}/{month}/{date}/")
+
+    df=handle_nulls(df)   #HANDLING NULL ENTRIES IN DATAFRAMES (Transformation)
+    df=addAuditField(df)  #ADDING AUDIT FIELD IN DATAFRAMES (Transformation)
+
+    #Creating Silver managed table
+    createDBFSSilverTable(df,dbutils.fs.ls(bronzeMount)[i].name.replace("/",""))
+
+    #Creating transformed silver delta table in silver location
+    df.write.mode("append").format("delta").save(silverMount+"/"+dbutils.fs.ls(bronzeMount)[i].name+year+"/"+month+"/"+date)
+    i+=1
+
+# COMMAND ----------
+
+dfad=spark.table("silver.address")
+dfad.printSchema()
+
+# COMMAND ----------
+
+spark.sql("""CREATE TABLE incomingData (
+    AddressID INT,
+    AddressLine1 VARCHAR(255),
+    AddressLine2 VARCHAR(255),
+    City VARCHAR(255),
+    StateProvince VARCHAR(255),
+    CountryRegion VARCHAR(255),
+    PostalCode VARCHAR(50),
+    rowguid VARCHAR(36),
+    ModifiedDate TIMESTAMP
+)""")
+
+# COMMAND ----------
+
+spark.sql("insert into incomingData values (31, 'Perungudi003', 'NA', 'Chennai', 'Tamil Nadu', 'India', '600095', '981b3303-aca2-49c7-9a96-fb670785b269', current_timestamp())")
+spark.sql("insert into incomingData values (27, 'MGRCTRL', 'NA', 'Chennai', 'Tamil nadu', 'India', '610001', '981b3303-aca2-49c7-9a96-fb670785b269', current_timestamp())")
+spark.sql("insert into incomingData values (26, 'Perungudi002', 'NA','Chennai', 'Tamil Nadu', 'India', '600095', '981b3303-aca2-49c7-9a96-fb670785b269', current_timestamp())")
+spark.sql("insert into incomingData values (9, 'MGRCTRL07', 'NA', 'Chennai', 'Tamil nadu', 'India', '610007', '981b3303-aca2-49c7-9a96-fb670785b269', current_timestamp())")
+spark.sql("insert into incomingData values (25, 'MGRCTRL08', 'NA', 'Chennai', 'Tamil nadu', 'India', '610008', '981b3303-aca2-49c7-9a96-fb670785b269', current_timestamp())")
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * from incomingdata;
+
+# COMMAND ----------
+
+dfIncoming=spark.table("incomingData")
+spark.conf.set("fs.azure.account.key.samrigank.dfs.core.windows.net", "S/92C5UbsMY+IjHBro23tkGQymC1yPkPlaGExkQ4X+zX65mR9X5Z6s9KyqDJgwEV+fwWWRDohtpN+AStrV9cxg==")
+dfIncoming.write.format("parquet").mode("overwrite").save("abfss://hritikbronzezone@samrigank.dfs.core.windows.net/customFileAddition/")
+
+# COMMAND ----------
+
+dfadd=spark.read.format("parquet").option("header", "true").option("inferSchema", "true").load("abfss://hritikbronzezone@samrigank.dfs.core.windows.net/customFileAddition/")
+display(dfadd)
+
+# COMMAND ----------
+
+#Performing auditing on incoming file
+dfadd=addAuditField(dfadd)
+display(dfadd)
+
+# COMMAND ----------
+
+incomeDataCols= dfadd.columns
+print(incomeDataCols)
+
+# COMMAND ----------
+
+bronzeTableList = [item.name for item in dbutils.fs.ls(bronzeMount)]
+print(bronzeTableList)
+
+# COMMAND ----------
+
+# MAGIC %run ./config
+
+# COMMAND ----------
+
+dfaddress=spark.read.format("delta").option("header", "true").option("inferSchema", "true").load(silverMount + "/Address/" + year + "/" + month + "/" + date)
+display(dfaddress)
+
+# COMMAND ----------
+
+from delta.tables import DeltaTable
+curruser = dbutils.notebook.entry_point.getDbutils().notebook().getContext().tags().get('user')
+curruser=str(curruser)
+curruser=curruser[5:len(curruser)-1]
+
+for bronzeTable in bronzeTableList:
+    df = spark.read.format("delta").option("header", "true").option("inferSchema", "true").load(silverMount + "/" + bronzeTable + year + "/" + month + "/" + date)
+    flag = True
+    matchingCols = []
+    for tCol in primaryKeys.get(bronzeTable[:-1]):
+        if tCol not in incomeDataCols:
+            flag = False
+            break
+    if flag == True:
+        for tCol in primaryKeys.get(bronzeTable[:-1]):
+            matchingCols.append(tCol)
+        print(matchingCols)
+        mergeCondition = ' AND '.join([f"incoming.{col} = existing.{col}" for col in matchingCols])
+        deltaTableObj = DeltaTable.forPath(spark, f"{silverMount}/{bronzeTable}{year}/{month}/{date}") 
+        deltaTableObj.alias("incoming").merge( dfadd.alias("existing"), mergeCondition ).whenMatchedUpdate(set={"Last_modified_by": f'"{curruser}"', "Last_modified_date": current_timestamp()}).whenNotMatchedInsertAll().execute()
+
+# COMMAND ----------
+
+dfaddress=spark.read.format("delta").option("header", "true").option("inferSchema", "true").load(silverMount + "/Address/" + year + "/" + month + "/" + date)
+display(dfaddress)
+
+# COMMAND ----------
+
+tableList=[item.name for item in dbutils.fs.ls(silverMount)]
+print(tableList)
+
+# COMMAND ----------
+
+# Calculating profiling statistical values for each column of every table
+tableList = [item.name for item in dbutils.fs.ls(silverMount)]
+tableColProfeDtat = spark.createDataFrame([], statSchema)
+for silverTable in tableList:
+    df = spark.read.format("delta").option("header", "true").option("inferSchema", "true").load(silverMount + "/" + silverTable + year + "/" + month + "/" + date)
+    profilingStatDF = spark.createDataFrame([], statSchema)
+    for column in df.columns:
+        stat = getProfilingStats(df, silverTable[:-1], column)
+        statDF = spark.createDataFrame([stat], schema=statSchema)
+        profilingStatDF = profilingStatDF.union(statDF)
+    tableColProfeDtat = tableColProfeDtat.union(profilingStatDF)
+tableColProfeDtat.write.mode("overwrite").format("delta").save(silverMount + "/" + "ProfilingStats" + "/")
+
+# COMMAND ----------
+
+display(spark.read.format("delta").option("header", "true").option("inferSchema", "true").load(silverMount + "/" + "ProfilingStats" + "/"))
+
+
+Example Codebase 2:
+bronze_to_silver.py-
+# Databricks notebook source
+# MAGIC %run ./utils
+
+# COMMAND ----------
+
+# MAGIC %run ./config
+
+# COMMAND ----------
+
+# MAGIC %run ./mount
+
+# COMMAND ----------
+
+silver_mount="/mnt/silver"
+bronze_mount="/mnt/bronze"
+gold_mount="/mnt/gold"
+
+# COMMAND ----------
+
+files_in_mount = dbutils.fs.ls(bronze_mount)
+all_column_stats = []
+for file_info in files_in_mount:
+    print(file_info)
+
+# COMMAND ----------
+
+
+lenFileList=len(dbutils.fs.ls(bronze_mount))
+i=0
+while(i<lenFileList):
+    df = spark.read.format("parquet").option("mode","PERMISSSIVE").option("columnNameOfCorruptRecord","BadRecord").option("badRecordPath",f"/mnt/bronze/bad_records/{dbutils.fs.ls(bronze_mount)[i].name}{year}/{month}/{day}").option("header", "true").option("inferSchema", "true").load(f"{mount_point}/{dbutils.fs.ls(mount_point)[i].name}{year}/{month}/{day}")
+    display(df)
+    df=handle_nulls(df)   #HANDLING NULL ENTRIES IN DATAFRAMES (Transformation)
+    df=addAuditField(df)  #ADDING AUDIT FIELD IN DATAFRAMES (Transformation)
+
+    #Creating Silver managed table
+    createdbfsSilverTable(df,dbutils.fs.ls(bronze_mount)[i].name.replace("/",""))
+    #Creating transformed silver delta table in silver location
+    df.write.mode("append").format("delta").save(silver_mount+"/"+dbutils.fs.ls(bronze_mount)[i].name+year+"/"+month+"/"+day)
+    df.printSchema()
+    column_stats_df = get_column_statistics(df, file_info.name)
+        
+        # Add this file's statistics DataFrame to the list
+    all_column_stats.append(column_stats_df)
+    i+=1
+
+# COMMAND ----------
+
+if all_column_stats:
+    final_stats_df = all_column_stats[0]  # Start with the first DataFrame
+    for stat_df in all_column_stats[1:]:
+        final_stats_df = final_stats_df.unionByName(stat_df)  # Combine with others
+
+    # Display the combined DataFrame using `display()`
+    display(final_stats_df)
+    final_stats_df.write.mode("overwrite").saveAsTable("column_stats")
+    final_stats_df.write.mode("append").format("delta").save(f"/mnt/silver/profilingStats/{year}/{month}/{day}/")
+else:
+    print("No column statistics data to display.")
+
+# COMMAND ----------
+
+folder_names = [item.name[:-1] for item in dbutils.fs.ls(f"/mnt/bronze/")]
+print(folder_names)
+
+# COMMAND ----------
+
+for table in folder_names:
+    input_folder_path = f"/mnt/bronze/{table}/{year}/{month}/{day}/"
+    input_files = [f.path for f in dbutils.fs.ls(input_folder_path) if f.name.endswith(".parquet")]
+    print(input_files)
+
+# COMMAND ----------
+
+for table in folder_names:
+    output_folder_path = f"/mnt/silver/{table}/{year}/{month}/{day}/"
+    output_files = [f.path for f in dbutils.fs.ls(output_folder_path) if f.name.endswith(".snappy.parquet")]
+    print(output_files)
+
+# COMMAND ----------
+
+output_path = spark.read.format("delta").load(f"/mnt/silver/{table}/{year}/{month}/{day}/")
+print(output_path)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC
+
+upsert.py-
+# Databricks notebook source
+# MAGIC %run ./config
+
+# COMMAND ----------
+
+# MAGIC %run ./mount
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * from silver.Address
+
+# COMMAND ----------
+
+df = spark.table("silver.address")
+df.printSchema()
+
+# COMMAND ----------
+
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType, TimestampType
+from datetime import datetime
+
+
+# Define the schema
+schema = StructType([
+    StructField("AddressID", IntegerType(), True),
+    StructField("AddressLine1", StringType(), True),
+    StructField("AddressLine2", StringType(), True),
+    StructField("City", StringType(), True),
+    StructField("StateProvince", StringType(), True),
+    StructField("CountryRegion", StringType(), True),
+    StructField("PostalCode", StringType(), True),
+    StructField("rowguid", StringType(), True),
+    StructField("ModifiedDate", StringType(), True),
+    StructField("created_by", StringType(), True),
+    StructField("created_date", TimestampType(), True),
+    StructField("last_modified_date", TimestampType(), True),
+    StructField("last_modified_by", StringType(), True)
+])
+
+# Manually generate 10 rows of sample data matching the desired format
+data = [
+    (9, "8713 Yosemite Ct.", "NA", "Bothell", "Washington", "United States", "98011", "268af621-76d7-4c78-9441-144fd139821a", "2006-07-01 00:00:00", "abatch11@heu.ai", 
+     datetime(2025, 1, 20, 14, 1, 36, 719000), datetime(2025, 1, 20, 14, 1, 36, 719000), "abatch11@heu.ai"),
+    (10, "4567 Oak Dr.", "NA", "Redmond", "Washington", "United States", "98052", "368af621-76d7-4c78-9441-144fd139822b", "2025-01-20 12:30:00", "abatch12@heu.ai", 
+     datetime(2025, 1, 20, 12, 30, 0, 0), datetime(2025, 1, 20, 12, 30, 0, 0), "abatch12@heu.ai"),
+    (11, "7890 Pine St.", "NA", "Seattle", "Washington", "United States", "98101", "468af621-76d7-4c78-9441-144fd139823c", "2025-01-21 00:00:00", "abatch13@heu.ai", 
+     datetime(2025, 1, 21, 10, 0, 0, 0), datetime(2025, 1, 21, 10, 0, 0, 0), "abatch13@heu.ai"),
+    (25, "1234 Maple Ave.", "NA", "Kirkland", "Washington", "United States", "98034", "568af621-76d7-4c78-9441-144fd139824d", "2025-01-22 09:45:00", "abatch14@heu.ai", 
+     datetime(2025, 1, 22, 9, 45, 0, 0), datetime(2025, 1, 22, 9, 45, 0, 0), "abatch14@heu.ai"),
+    (28, "1357 Birch Ln.", "NA", "Bellevue", "Washington", "United States", "98008", "668af621-76d7-4c78-9441-144fd139825e", "2025-01-22 11:00:00", "abatch15@heu.ai", 
+     datetime(2025, 1, 22, 11, 0, 0, 0), datetime(2025, 1, 22, 11, 0, 0, 0), "abatch15@heu.ai"),
+    (14, "2468 Oakwood Ave.", "NA", "Redmond", "Washington", "United States", "98007", "768af621-76d7-4c78-9441-144fd139826f", "2025-01-22 13:30:00", "abatch16@heu.ai", 
+     datetime(2025, 1, 22, 13, 30, 0, 0), datetime(2025, 1, 22, 13, 30, 0, 0), "abatch16@heu.ai"),
+    (15, "5678 Cedar Lane", "NA", "Issaquah", "Washington", "United States", "98029", "868af621-76d7-4c78-9441-144fd1398270", "2025-01-23 08:00:00", "abatch17@heu.ai", 
+     datetime(2025, 1, 23, 8, 0, 0, 0), datetime(2025, 1, 23, 8, 0, 0, 0), "abatch17@heu.ai"),
+    (16, "2345 Pinewood Blvd", "NA", "Seattle", "Washington", "United States", "98105", "968af621-76d7-4c78-9441-144fd1398281", "2025-01-23 15:45:00", "abatch18@heu.ai", 
+     datetime(2025, 1, 23, 15, 45, 0, 0), datetime(2025, 1, 23, 15, 45, 0, 0), "abatch18@heu.ai"),
+    (17, "6789 Maple Dr.", "NA", "Bellevue", "Washington", "United States", "98005", "c68af621-76d7-4c78-9441-144fd1398292", "2025-01-24 10:00:00", "abatch19@heu.ai", 
+     datetime(2025, 1, 24, 10, 0, 0, 0), datetime(2025, 1, 24, 10, 0, 0, 0), "abatch19@heu.ai"),
+    (18, "3456 Oak Blvd.", "NA", "Redmond", "Washington", "United States", "98006", "d68af621-76d7-4c78-9441-144fd13982a3", "2025-01-24 11:30:00", "abatch20@heu.ai", 
+     datetime(2025, 1, 24, 11, 30, 0, 0), datetime(2025, 1, 24, 11, 30, 0, 0), "abatch20@heu.ai"),
+    (19, "8901 Pine Ridge", "NA", "Kirkland", "Washington", "United States", "98033", "e68af621-76d7-4c78-9441-144fd13982b4", "2025-01-25 09:15:00", "abatch21@heu.ai", 
+     datetime(2025, 1, 25, 9, 15, 0, 0), datetime(2025, 1, 25, 9, 15, 0, 0), "abatch21@heu.ai")
+]
+
+# Create the DataFrame
+df = spark.createDataFrame(data, schema)
+display(df)
+
+
+# COMMAND ----------
+
+df.createOrReplaceTempView("df")
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * from df
+
+# COMMAND ----------
+
+from pyspark.sql import functions as F
+from delta.tables import DeltaTable
+
+def upsert_delta(delta_table, df, primary_keys, current_time, current_user):
+    """
+    Upsert data from a DataFrame into a Delta table.
+
+    Parameters:
+    delta_table (DeltaTable): The target Delta table.
+    df (DataFrame): The DataFrame to be upserted.
+    primary_keys (list): The primary key columns for matching records.
+    current_time (str): The current timestamp.
+    current_user (str): The user performing the operation.
+    """
+    # Prepare the update condition for the merge (based on primary keys)
+    merge_condition = " AND ".join([f"target.{pk} = source.{pk}" for pk in primary_keys])
+
+    # Prepare the "when matched" and "when not matched" conditions
+    # "when matched" updates the existing rows
+    # "when not matched" inserts new rows
+    delta_table.alias("target") \
+        .merge(
+            df.alias("source"),
+            merge_condition
+        ) \
+        .whenMatchedUpdate(
+            condition=" AND ".join([f"target.{pk} = source.{pk}" for pk in primary_keys]),  # Optional: condition for updating
+            set={
+                "target.AddressLine1": "source.AddressLine1",
+                "target.AddressLine2": "source.AddressLine2",
+                "target.City": "source.City",
+                "target.StateProvince": "source.StateProvince",
+                "target.CountryRegion": "source.CountryRegion",
+                "target.PostalCode": "source.PostalCode",
+                "target.rowguid": "source.rowguid",
+                "target.ModifiedDate": "source.ModifiedDate",
+                "target.created_by": "source.created_by",
+                "target.created_date": "source.created_date",
+                "target.last_modified_date": F.lit(current_time),
+                "target.last_modified_by": F.lit(current_user)
+            }
+        ) \
+        .whenNotMatchedInsert(
+            values={
+                "AddressID": "source.AddressID",
+                "AddressLine1": "source.AddressLine1",
+                "AddressLine2": "source.AddressLine2",
+                "City": "source.City",
+                "StateProvince": "source.StateProvince",
+                "CountryRegion": "source.CountryRegion",
+                "PostalCode": "source.PostalCode",
+                "rowguid": "source.rowguid",
+                "ModifiedDate": "source.ModifiedDate",
+                "created_by": "source.created_by",
+                "created_date": "source.created_date",
+                "last_modified_date": F.lit(current_time),
+                "last_modified_by": F.lit(current_user)
+            }
+        ) \
+        .execute()
+
+
+# COMMAND ----------
+
+dbutils.fs.ls(f"/mnt/silver/Address/{year}/{month}/{day}/")
+
+# COMMAND ----------
+
+delta = spark.read.format("delta").load(f"/mnt/silver/Address/{year}/{month}/{day}/")
+display(delta)
+
+# COMMAND ----------
+
+from delta.tables import DeltaTable
+table_path = f"/mnt/silver/Address/{year}/{month}/{day}/"
+delta_table = DeltaTable.forPath(spark, table_path)
+current_time = spark.sql("SELECT current_timestamp()").collect()[0][0]
+current_user =  dbutils.notebook.entry_point.getDbutils().notebook().getContext().userName().get()
+primary_keys = ["AddressID"]
+upsert_delta(delta_table, df, primary_keys,current_time, current_user)
+
+# COMMAND ----------
+
+delta = spark.read.format('delta').load(f"/mnt/silver/Address/{year}/{month}/{day}/")
+
+# Show the content
+display(delta)
+
+
+Example Codebase 3:
+bronze_to_silver.py
+
+# Databricks notebook source
+# %sql
+# DROP DATABASE IF EXISTS silvertable CASCADE;
+
+# COMMAND ----------
+
+# MAGIC %run ./mountil05
+
+# COMMAND ----------
+
+# MAGIC %run ./Utility_il05
+
+# COMMAND ----------
+
+# MAGIC %run ./configil05
+
+# COMMAND ----------
+
+bronzeMount="/mnt/bronze"
+silverMount="/mnt/silver"
+lenOfFileList=len(dbutils.fs.ls(bronzeMount))
+fileList = dbutils.fs.ls(bronzeMount)
+
+i=0
+while(i<lenOfFileList):
+
+    file_info = fileList[i]
+    file_name = file_info.name
+    # file_path = f"
+
+    df = spark.read.format("parquet") \
+        .option("header", "true")\
+        .option("columnNameOfCorruptRecord","BadRecord")\
+        .option("badRecordPath",f"/mnt/bronze/bad_records/{file_name}{year}/{month}/{day}")\
+        .option("mode", "PERMISSIVE")\
+        .option("inferSchema","true")\
+        .load(f"{bronzeMount}/{file_name}{year}/{month}/{day}")
+
+    
+    display(df)
+
+    df=handle_nulls(df)  
+    df=addAuditField(df)   
+
+    # silver managed table
+    create_DBFS_SilverTable(df, file_name.replace("/", ""))
+    
+    # silver delta table
+    df.write.mode("overwrite").format("delta").save(f"{silverMount}/{file_name}/{year}/{month}/{day}")
+
+    df.printSchema()
+
+    i+=1
+
+# COMMAND ----------
+
+# bronzeMount="/mnt/bronze"
+# silverMount="/mnt/silver"
+# lenFileList=len(dbutils.fs.ls(bronzeMount))
+# i=0
+# while(i<lenFileList):
+    
+#     df = spark.read.format("parquet").option("header", "true").option("mode", "DROPMALFORMED").option("inferSchema", "true").load(bronzeMount+"/"+dbutils.fs.ls(bronzeMount)[i].name+year+"/"+month+"/"+day)
+    
+#     df=handle_nulls(df)  
+#     df=addAuditField(df)   
+
+#     create_DBFS_SilverTable(df,dbutils.fs.ls(bronzeMount)[i].name.replace("/",""))
+    
+#     df.write.mode("append").format("delta").save(silverMount+"/"+dbutils.fs.ls(bronzeMount)[i].name+year+"/"+month+"/"+day)
+
+#     df.printSchema()
+#     i+=1
+
+# COMMAND ----------
+
+folder_names = [item.name[:-1] for item in dbutils.fs.ls(f"/mnt/bronze/")]
+print(folder_names)
+
+
+# COMMAND ----------
+
+# def validations(source=> bronze df=> coltype,   destination=> silver df=> coltype)
+    # source df same as destination df?
+
+    # before null
+    # call handlenull function
+    # after null
+
+
+
+
+# COMMAND ----------
+
+# Profiling stats for each column . => store in adls + as delta table
+
+# COMMAND ----------
+
+from datetime import datetime
+from pyspark.sql import functions as F
+
+# Extract the year, month, and day
+year = datetime.utcnow().strftime("%Y")
+month = datetime.utcnow().strftime("%m")
+day = datetime.utcnow().strftime("%d")
+
+# List all the table names in the bronze folder
+tablenames = [table.name.replace('/', '') for table in dbutils.fs.ls('mnt/bronze')]
+
+def validation():
+
+    for table in tablenames: 
+        # Load the bronze table from the Parquet data
+        df_bronze = spark.read.format("parquet").load(f"/mnt/bronze/{table}/{year}/{month}/{day}")
+        
+        # Load the corresponding silver table from the Delta table
+        df_silver = spark.table(f"silvertable.{table}")
+
+        # Get row counts for both bronze and silver
+        Bc = df_bronze.count()
+        Sc = df_silver.count()
+
+         
+        # Count Validation
+        if Bc != Sc:
+            print(f"Bronze count: {Bc}, Silver count: {Sc}")
+            print(f"Count mismatch for table: {table}")
+            print(f"Bronze count: {Bc}, Silver count: {Sc}")
+            return "Count Validation Failed"
+
+        # Schema Validation: Check if data types match between bronze and silver tables
+        for column in df_bronze.columns:
+            if df_bronze.schema[column].dataType != df_silver.schema[column].dataType:
+                print(f"Schema mismatch found in column: {column}")
+                return "Schema Validation Failed"
+
+            # Null Validation: Check for null values in each column of the silver table
+            null_count = df_silver.filter(df_silver[column].isNull()).count()
+            if null_count > 0:
+                print(f"Null values found in column: {column} in table: {table}")
+                return "Null Validation Failed"
+    
+    return "Validation Passed"
+
+# Run the validation function
+result = validation()
+print(result)
+
+
+# COMMAND ----------
+
+# %sql
+# select * from silvertable.Address
+
+# COMMAND ----------
+
+# df_existing= spark.table("silvertable.address")
+# df_existing.printSchema()
+
+# COMMAND ----------
+
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType, TimestampType
+from datetime import datetime
+
+
+# Define the schema
+schema = StructType([
+    StructField("AddressID", IntegerType(), True),
+    StructField("AddressLine1", StringType(), True),
+    StructField("AddressLine2", StringType(), True),
+    StructField("City", StringType(), True),
+    StructField("StateProvince", StringType(), True),
+    StructField("CountryRegion", StringType(), True),
+    StructField("PostalCode", StringType(), True),
+    StructField("rowguid", StringType(), True),
+    StructField("ModifiedDate", StringType(), True),
+    StructField("created_by", StringType(), True),
+    StructField("created_date", TimestampType(), True),
+    StructField("last_modified_date", TimestampType(), True),
+    StructField("last_modified_by", StringType(), True)
+])
+
+# Manually generate 10 rows of sample data matching the desired format
+data = [
+    (9, "8713 Yosemite Ct.", "NA", "Bothell", "Washington", "United States", "98011", "268af621-76d7-4c78-9441-144fd139821a", "2006-07-01 00:00:00", "abatch11@heu.ai", 
+     datetime(2025, 1, 20, 14, 1, 36, 719000), datetime(2025, 1, 20, 14, 1, 36, 719000), "abatch11@heu.ai"),
+    (11, "7890 Pine St.", "NA", "Seattle", "Washington", "United States", "98101", "468af621-76d7-4c78-9441-144fd139823c", "2025-01-21 00:00:00", "abatch13@heu.ai", 
+     datetime(2025, 1, 21, 10, 0, 0, 0), datetime(2025, 1, 21, 10, 0, 0, 0), "abatch13@heu.ai"),
+    (25, "1234 Maple Ave.", "NA", "Kirkland", "Washington", "United States", "98034", "568af621-76d7-4c78-9441-144fd139824d", "2025-01-22 09:45:00", "abatch14@heu.ai", 
+     datetime(2025, 1, 22, 9, 45, 0, 0), datetime(2025, 1, 22, 9, 45, 0, 0), "abatch14@heu.ai"),
+    
+    
+    (17, "7890 Maple Dr.", "NA", "Bellevue", "Washington", "United States", "98004", "c98af621-56d7-4c78-9441-304fd1398a10", "2025-01-24 10:00:00", "cbatch19@heu.ai", 
+     datetime(2025, 1, 24, 10, 0, 0, 0), datetime(2025, 1, 24, 10, 0, 0, 0), "cbatch19@heu.ai"),
+    (18, "2468 Pine Blvd.", "NA", "Redmond", "Washington", "United States", "98010", "e98af621-76d7-4c78-9441-314fd1398b7f", "2025-01-24 11:30:00", "cbatch20@heu.ai", 
+     datetime(2025, 1, 24, 11, 30, 0, 0), datetime(2025, 1, 24, 11, 30, 0, 0), "cbatch20@heu.ai"),
+    (19, "1234 Cedar Ridge", "NA", "Kirkland", "Washington", "United States", "98033", "f98af621-76d7-4c78-9441-414fd1398c23", "2025-01-25 09:15:00", "cbatch21@heu.ai", 
+     datetime(2025, 1, 25, 9, 15, 0, 0), datetime(2025, 1, 25, 9, 15, 0, 0), "cbatch21@heu.ai")
+
+
+]
+
+# Create the DataFrame
+df_updates = spark.createDataFrame(data, schema)
+display(df_updates)
+
+
+
+
+# COMMAND ----------
+
+# # Get the list of tables in the silvertable schema
+# tables = spark.sql("SHOW TABLES IN silvertable").collect()
+
+# # Iterate through each table and print its columns
+# for table in tables:
+#     full_table_name = f"silvertable.{table.tableName}"
+#     df = spark.table(full_table_name)
+#     print(f"Table: {full_table_name}")
+#     print("Columns:", df.columns)
+#     print()
+
+# COMMAND ----------
+
+# df_updates.write.mode("overwrite").format("parquet").save("")
+
+# df_updates=spark.table("newUpdates")
+spark.conf.set("fs.azure.account.key.stil05.dfs.core.windows.net", "AnfQU3kImNSPzAz2jVdeDZgRyEfRjFUclPoNSdkT/r5cnoBwj56uXBj5rsbnjXeZaYpdFsGasK/t+ASt9qagTQ==")
+df_updates.write.format("parquet").mode("overwrite").save("abfss://bronze@stil05.dfs.core.windows.net/dummy_updates/")
+
+
+# COMMAND ----------
+
+df_updates_columns = df_updates.columns
+print(df_updates_columns)
+
+
+
+
+
+
+
+# COMMAND ----------
+
+current_time = spark.sql("SELECT current_timestamp()").collect()[0][0]
+current_user =  dbutils.notebook.entry_point.getDbutils().notebook().getContext().userName().get()
+
+# Get the list of tables in the silvertable schema
+tables = spark.sql("SHOW TABLES IN silvertable").collect()
+tables = [table for table in tables if not table.isTemporary]
+
+# Iterate through each table and print its columns
+for table in tables:
+    full_table_name = f"silvertable.{table.tableName}"
+    df = spark.table(full_table_name)
+    # print(f"Table: {full_table_name}")
+    # print("Columns:", df.columns)
+    columns_in_existing = df.columns
+
+    if columns_in_existing == df_updates_columns:
+       upsert_delta(delta_table=DeltaTable.forName(spark, full_table_name), df=df_updates, primary_keys=["AddressID"], current_time=current_time, current_user=current_user)
+
+
+    # print()
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * from silvertable.Address;
+
+# COMMAND ----------
+
+dfaddress=spark.read.format("parquet").option("header", "true").option("inferSchema", "true").load(bronzeMount + "/Address/" + year + "/" + month + "/" + day)
+display(dfaddress)
+
+# COMMAND ----------
+
+# tables = spark.sql("SHOW TABLES IN silvertable").collect()
+# print(tables)  # Check if _sqldf is part of the list
+
+
+# COMMAND ----------
+
+######
+
+# COMMAND ----------
+
+# from delta.tables import DeltaTable
+# table_path = f"/mnt/silver/Address/{year}/{month}/{day}/" #df_existing
+# delta_table = DeltaTable.forPath(spark, table_path)
+# current_time = spark.sql("SELECT current_timestamp()").collect()[0][0]
+# current_user =  dbutils.notebook.entry_point.getDbutils().notebook().getContext().userName().get()
+# primary_keys = ["AddressID"]
+# upsert_delta(delta_table, df_updates, primary_keys,current_time, current_user)
+
+# COMMAND ----------
+
+# delta = spark.read.format('delta').load(f"/mnt/silver/Address/{year}/{month}/{day}/")
+
+# display(delta)
+
+# COMMAND ----------
+
+
+
+# COMMAND ----------
+
+# Calculating profiling statistical values for each column of every table
+tableList = [item.name for item in dbutils.fs.ls(silverMount)]
+tableColProfeDtat = spark.createDataFrame([], statSchema)
+for silverTable in tableList:
+    df = spark.read.format("delta").option("header", "true").option("inferSchema", "true").load(silverMount + "/" + silverTable + year + "/" + month + "/" + day)
+    profilingStatDF = spark.createDataFrame([], statSchema)
+    for column in df.columns:
+        stat = getProfilingStats(df, silverTable[:-1], column)
+        statDF = spark.createDataFrame([stat], schema=statSchema)
+        profilingStatDF = profilingStatDF.union(statDF)
+    tableColProfeDtat = tableColProfeDtat.union(profilingStatDF)
+tableColProfeDtat.write.mode("overwrite").format("delta").save(silverMount + "/" + "ProfilingStats" + "/")
+
+# COMMAND ----------
+
+# Display the profiling statistics DataFrame
+display(ProfilingStats_df)
+
+# COMMAND ----------
+
+# %sql
+
+# delete from silvertable.Address where AddressID in (17,18,19)
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * from silvertable.Address
+
+# COMMAND ----------
+
